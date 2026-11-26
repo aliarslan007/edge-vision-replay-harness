@@ -128,6 +128,49 @@ def test_end_of_stream_drain_vs_timeout():
     assert a["entries"]["entry_recall"] == 1.0 and b["entries"]["entry_recall"] < 1.0
 
 
+def test_llama_pipeline_sends_extra_and_flags_truncation():
+    """Fake llama-server: checks the request body (max_tokens, --extra fields, image) and that a
+    finish_reason of 'length' is logged as a truncated call."""
+    import http.server, threading
+    seen = []
+
+    class Fake(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(body)
+            truncated = len(seen) % 2 == 0          # every second call "runs out of tokens"
+            msg = ({"content": "", "reasoning_content": "thinking " * 50} if truncated else
+                   {"content": 'Here: [{"upper_color": "red"}]', "reasoning_content": "short thought"})
+            out = json.dumps({"choices": [{"message": msg, "finish_reason": "length" if truncated else "stop"}],
+                              "timings": {"prompt_n": 900, "prompt_ms": 4000.0, "predicted_n": 40, "predicted_ms": 3000.0},
+                              "usage": {"completion_tokens": 40}}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cli.main(["--source", MP4, "--gt", GTP, "--labels", LABP, "--pipeline", "llama",
+                  "--llama-url", f"http://127.0.0.1:{srv.server_address[1]}", "--extra", '{"cache_prompt": false}',
+                  "--interval-s", "10", "--capacity", "none", "--speed", "4", "--out", str(TMP / "fake_llama")])
+    finally:
+        srv.shutdown()
+    b = seen[0]
+    assert b["max_tokens"] == 2048 and b["cache_prompt"] is False and b["temperature"] == 0
+    assert b["messages"][0]["content"][0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    m = metrics("fake_llama")
+    assert m["vlm"]["calls"] == len(seen) == 6 and m["vlm"]["truncated_calls"] == 3, m["vlm"]
+    assert m["records"]["n_invalid_outputs"] == 3                     # truncated -> no JSON -> invalid record
+    assert m["vlm"]["per_call_means"]["prompt_n"] == 900
+    ev = read_log(TMP / "fake_llama" / "events.jsonl")
+    assert next(e for e in ev if e["ev"] == "run_start")["meta"]["extra"] == {"cache_prompt": False}
+    out = next(e for e in ev if e["ev"] == "vlm_output" and e["parse_ok"])
+    assert out["raw"].startswith("<think>short thought</think>")
+
+
 def test_image_list_source_and_pacing():
     """Frame-list source gives the same frames; pacing is accurate; 1x and 4x serve the same frames."""
     counts = {}

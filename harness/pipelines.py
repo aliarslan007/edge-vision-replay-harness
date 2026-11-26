@@ -152,7 +152,7 @@ class LlamaServerVLM(QueuedVLMPipeline):
                       'If nobody is visible answer {"persons": []}.')
 
     def __init__(self, url: str = "http://127.0.0.1:8080", prompt: Optional[str] = None,
-                 max_tokens: int = 512, resize_long_side: Optional[int] = None, jpeg_quality: int = 90,
+                 max_tokens: int = 2048, resize_long_side: Optional[int] = None, jpeg_quality: int = 90,
                  extra: Optional[dict] = None, **kw):
         super().__init__(**kw)
         self.url, self.prompt = url.rstrip("/"), prompt or self.DEFAULT_PROMPT
@@ -181,10 +181,14 @@ class LlamaServerVLM(QueuedVLMPipeline):
         t = time.monotonic()
         with urllib.request.urlopen(req, timeout=600) as r:
             resp = json.loads(r.read())
-        msg = resp["choices"][0]["message"]
+        choice = resp["choices"][0]
+        msg = choice["message"]
         text = (msg.get("reasoning_content") and f"<think>{msg['reasoning_content']}</think>" or "") + (msg.get("content") or "")
         tm = resp.get("timings", {})
         return text, {"http_s": round(time.monotonic() - t, 3), "image_hw": list(img.shape[:2]),
                       "prompt_n": tm.get("prompt_n"), "prompt_ms": tm.get("prompt_ms"),
                       "predicted_n": tm.get("predicted_n"), "predicted_ms": tm.get("predicted_ms"),
-                      "usage": resp.get("usage")}
+                      "usage": resp.get("usage"),
+                      # "length" = the output hit max_tokens (e.g. thinking ran out of budget before the JSON)
+                      "finish_reason": choice.get("finish_reason"),
+                      "truncated": choice.get("finish_reason") == "length"}

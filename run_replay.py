@@ -7,7 +7,8 @@ Examples
       --pipeline stub --service-s 3 --capacity 0 --sample-fps 2 --speed 4 --out runs/stub_cap0
   # baseline: llama-server VLM, one full frame every 30 s, unbounded queue, no gating, real time
   python run_replay.py --source streams/test_01.mp4 --gt streams/test_01.gt.json --labels labels.json \
-      --pipeline llama --llama-url http://127.0.0.1:8080 --interval-s 30 --capacity none --speed 1 --out runs/baseline
+      --pipeline llama --llama-url http://127.0.0.1:8080 --interval-s 30 --capacity none --speed 1 \
+      --max-tokens 2048 --extra '{"cache_prompt": false}' --out runs/baseline
   # live camera (USB index 0, or an RTSP / MJPEG URL)
   python run_replay.py --source camera:0 --pipeline llama --sample-fps 1 --max-duration 60 --out runs/live
 """
@@ -64,7 +65,10 @@ def main(argv=None):
     ap.add_argument("--oracle-gate", action="store_true", help="stub: perfect gating (one VLM call per visit)")
     ap.add_argument("--llama-url", default="http://127.0.0.1:8080")
     ap.add_argument("--resize", type=int, default=None, help="llama: resize long side to N px before sending")
-    ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--max-tokens", type=int, default=2048,
+                    help="llama: output token limit; must cover thinking + JSON (thinking reached ~570 tokens on the Pi)")
+    ap.add_argument("--extra", default=None,
+                    help='llama: JSON object merged into every request, e.g. \'{"cache_prompt": false}\'')
     ap.add_argument("--gt", default=None, help="stream ground truth (needed for scoring and for the stub oracle)")
     ap.add_argument("--labels", default=None, help="attribute labels from P4")
     ap.add_argument("--out", required=True, help="run folder (events.jsonl, metrics.json, plots)")
@@ -74,13 +78,21 @@ def main(argv=None):
     cap = None if a.capacity.lower() == "none" else int(a.capacity)
     sample_fps = a.sample_fps if a.sample_fps else 1.0 / a.interval_s
     drain = float(a.drain_timeout)
+    extra = None
+    if a.extra:
+        try:
+            extra = json.loads(a.extra)
+        except json.JSONDecodeError as e:
+            ap.error(f"--extra is not valid JSON: {e.msg}")
+        if not isinstance(extra, dict):
+            ap.error("--extra must be a JSON object, e.g. '{\"cache_prompt\": false}'")
     gt = json.loads(Path(a.gt).read_text()) if a.gt else None
     labels = json.loads(Path(a.labels).read_text()) if a.labels else None
     if a.pipeline == "stub":
         pipe = StubVLM(service_s=a.service_s, oracle=oracle_from_gt(gt, labels) if gt else None,
                        capacity=cap, drop_policy=a.drop_policy, gate=oracle_gate(gt) if (a.oracle_gate and gt) else None)
     else:
-        pipe = LlamaServerVLM(url=a.llama_url, resize_long_side=a.resize, max_tokens=a.max_tokens,
+        pipe = LlamaServerVLM(url=a.llama_url, resize_long_side=a.resize, max_tokens=a.max_tokens, extra=extra,
                               capacity=cap, drop_policy=a.drop_policy)
 
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -90,7 +102,8 @@ def main(argv=None):
         info = run_replay(src, pipe, log, sample_fps=sample_fps, speed=a.speed, max_duration_s=a.max_duration,
                           drain_timeout_s=drain,
                           meta={"tag": a.tag, "argv": sys.argv[1:], "gt": a.gt, "labels": a.labels,
-                                "interval_s": a.interval_s, "drain_timeout_s": a.drain_timeout})
+                                "interval_s": a.interval_s, "drain_timeout_s": a.drain_timeout,
+                                "max_tokens": a.max_tokens, "extra": extra})
     finally:
         log.close(); src.close()
     print("replay finished:", info)

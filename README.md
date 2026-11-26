@@ -23,7 +23,7 @@ tests/          synthetic stream generator + end-to-end tests with known answers
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt      # opencv-python-headless, numpy, matplotlib (Python 3.9+)
-python tests/test_harness.py         # 10 tests, about 2 min; must print 10/10 passed
+python tests/test_harness.py         # 11 tests, about 2 min; must print 11/11 passed
 ```
 
 ## Typical runs
@@ -36,7 +36,7 @@ python run_replay.py --source streams/test_01.frames.txt --gt streams/test_01.gt
 #    unbounded queue, no gating, real time, wait for the queue to empty at the end
 python run_replay.py --source streams/test_01.frames.txt --gt streams/test_01.gt.json --labels labels.json \
     --pipeline llama --llama-url http://127.0.0.1:8080 --interval-s 30 --capacity none --speed 1 \
-    --drain-timeout inf --tag baseline --out runs/baseline_1x
+    --max-tokens 2048 --extra '{"cache_prompt": false}' --drain-timeout inf --tag baseline --out runs/baseline_1x
 
 # 3. Live camera through the same interface (P4)
 python run_replay.py --source camera:0 --pipeline llama --sample-fps 1 --capacity 0 --max-duration 120 --out runs/live
@@ -55,6 +55,8 @@ Each run folder gets `events.jsonl` (everything that happened), `metrics.json`, 
 | `--drop-policy reject_new / drop_oldest` | what a full bounded queue does |
 | `--speed 1 / 2 / 4` | replay speed-up; time-to-post and drops must come from 1x |
 | `--drain-timeout inf / N` | end-of-stream behaviour (below) |
+| `--max-tokens 2048` | llama: output limit (default 2048); must cover thinking + JSON. Calls that hit it are logged with `truncated: true` and counted in `metrics.json` → `vlm.truncated_calls` |
+| `--extra '{"cache_prompt": false}'` | llama: JSON merged into every request. `cache_prompt: false` stops llama-server reusing the previous prompt's KV cache, so every call pays its full prefill cost (fair per-record cost measurement) |
 
 ## How it calls the VLM (`--pipeline llama`)
 
@@ -66,7 +68,7 @@ POST http://127.0.0.1:8080/v1/chat/completions
 {"messages": [{"role": "user", "content": [
      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<frame as JPEG>"}},
      {"type": "text", "text": "<record prompt>"}]}],
- "max_tokens": 512, "temperature": 0}
+ "max_tokens": 2048, "temperature": 0, <fields from --extra>}
 ```
 
 - The frame is sent at native resolution unless `--resize N` is given (long side in pixels).
