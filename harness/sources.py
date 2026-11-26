@@ -8,6 +8,7 @@ newest captured frame is returned; its media_ts is the capture time relative to 
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -117,6 +118,12 @@ class ImageSequenceSource(FrameSource):
         return {**super().describe(), "path": str(self.path), "n_frames": len(self.files)}
 
 
+# Low-latency FFmpeg options for network cameras (RTSP / HTTP-MJPEG): no read-ahead buffering, minimal probing.
+# Measured by P4 on the Pi: transport latency 1.04 s -> 0.39 s. setdefault: an environment value set by the
+# user still wins. Must be set before cv2.VideoCapture() opens the stream.
+LOW_LATENCY_FFMPEG = "fflags;nobuffer|flags;low_delay|probesize;32|analyzeduration;0"
+
+
 class CameraSource(FrameSource):
     """Live camera: USB index ("0") or a network URL (rtsp://..., http://.../video for MJPEG).
 
@@ -130,6 +137,10 @@ class CameraSource(FrameSource):
         self.size = (width, height)
 
     def open(self):
+        self.ffmpeg_options = None
+        if isinstance(self.uri, str):                     # network stream -> FFmpeg backend
+            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", LOW_LATENCY_FFMPEG)
+            self.ffmpeg_options = os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"]
         self.cap = cv2.VideoCapture(self.uri)
         if not self.cap.isOpened():
             raise ConnectionError(f"cannot open camera {self.uri}")
@@ -171,7 +182,7 @@ class CameraSource(FrameSource):
         self.cap.release()
 
     def describe(self):
-        return {**super().describe(), "uri": str(self.uri)}
+        return {**super().describe(), "uri": str(self.uri), "ffmpeg_capture_options": self.ffmpeg_options}
 
 
 def open_source(spec: str, fps: Optional[float] = None) -> FrameSource:
